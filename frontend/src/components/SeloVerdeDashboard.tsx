@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Bar,
   BarChart,
+  CartesianGrid,
   PolarAngleAxis,
   PolarGrid,
   Radar,
@@ -13,208 +14,446 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { calculateWithApi, presetCriteria, sampleSuppliers, type CalculationResult, type Supplier } from "@/lib/api";
+import {
+  calculateWithApi,
+  createSupplier,
+  deleteSupplier,
+  fetchDecisionRuns,
+  fetchSuppliers,
+  getExportUrl,
+  hasApiConfig,
+  localMarcosCalculation,
+  presetCriteria,
+  sampleSuppliers,
+  saveDecisionRun,
+  type CalculationResult,
+  type DecisionRun,
+  type SupplierEntity,
+  updateSupplier,
+} from "@/lib/api";
 
-function localMarcosCalculation(runName: string, suppliers: Supplier[]): CalculationResult {
-  const criteria = presetCriteria;
-  const rows = suppliers.map((supplier) => supplier.values);
-  const aai: Record<string, number> = {};
-  const ai: Record<string, number> = {};
+type SupplierFormState = {
+  id?: number;
+  name: string;
+  contact: string;
+  notes: string;
+  values: Record<string, number>;
+};
 
-  for (const criterion of criteria) {
-    const values = rows.map((row) => row[criterion.id]);
-    if (criterion.type === "benefit") {
-      aai[criterion.id] = Math.min(...values);
-      ai[criterion.id] = Math.max(...values);
-    } else {
-      aai[criterion.id] = Math.max(...values);
-      ai[criterion.id] = Math.min(...values);
-    }
-  }
+function buildEmptyValues() {
+  return Object.fromEntries(presetCriteria.map((criterion) => [criterion.id, 5])) as Record<string, number>;
+}
 
-  const extended = [aai, ...rows, ai];
-  const normalized = extended.map((row) => {
-    const out: Record<string, number> = {};
-    for (const criterion of criteria) {
-      out[criterion.id] = criterion.type === "benefit"
-        ? row[criterion.id] / ai[criterion.id]
-        : ai[criterion.id] / row[criterion.id];
-    }
-    return out;
-  });
-
-  const weighted = normalized.map((row) => {
-    const out: Record<string, number> = {};
-    for (const criterion of criteria) {
-      out[criterion.id] = row[criterion.id] * criterion.weight;
-    }
-    return out;
-  });
-
-  const sums = weighted.map((row) => Object.values(row).reduce((acc, cur) => acc + cur, 0));
-  const sAai = sums[0];
-  const sAi = sums[sums.length - 1];
-
-  const scores = suppliers.map((supplier, index) => {
-    const s_i = sums[index + 1];
-    const k_i_minus = s_i / sAai;
-    const k_i_plus = s_i / sAi;
-    const f_k_minus = k_i_plus / (k_i_plus + k_i_minus);
-    const f_k_plus = k_i_minus / (k_i_plus + k_i_minus);
-    const f_k_i = (k_i_plus + k_i_minus) / (
-      1 + ((1 - f_k_plus) / f_k_plus) + ((1 - f_k_minus) / f_k_minus)
-    );
-
-    return {
-      supplier_id: supplier.id,
-      supplier_name: supplier.name,
-      s_i: Number(s_i.toFixed(6)),
-      k_i_minus: Number(k_i_minus.toFixed(6)),
-      k_i_plus: Number(k_i_plus.toFixed(6)),
-      f_k_i: Number(f_k_i.toFixed(6)),
-      rank: 0,
-    };
-  }).sort((a, b) => b.f_k_i - a.f_k_i)
-    .map((score, index) => ({ ...score, rank: index + 1 }));
-
+function buildInitialForm(): SupplierFormState {
   return {
-    run_name: runName,
-    aai,
-    ai,
-    normalized_matrix: normalized,
-    weighted_matrix: weighted,
-    scores,
+    name: "",
+    contact: "",
+    notes: "",
+    values: buildEmptyValues(),
   };
 }
 
+function toFormState(supplier?: SupplierEntity): SupplierFormState {
+  if (!supplier) return buildInitialForm();
+  return {
+    id: typeof supplier.id === "number" ? supplier.id : undefined,
+    name: supplier.name,
+    contact: supplier.contact ?? "",
+    notes: supplier.notes ?? "",
+    values: { ...supplier.values },
+  };
+}
+
+function toDraftPayload(form: SupplierFormState) {
+  return {
+    name: form.name,
+    contact: form.contact,
+    notes: form.notes,
+    values: form.values,
+  };
+}
+
+function supplierIdValue(supplier: SupplierEntity) {
+  return typeof supplier.id === "number" ? supplier.id : String(supplier.id);
+}
+
 export function SeloVerdeDashboard() {
-  const [runName, setRunName] = useState("Rodada Saladorama");
-  const [suppliers, setSuppliers] = useState(sampleSuppliers);
-  const [result, setResult] = useState<CalculationResult>(() => localMarcosCalculation("Rodada Saladorama", sampleSuppliers));
+  const [runName, setRunName] = useState("Rodada Estratégica de Fornecedores");
+  const [suppliers, setSuppliers] = useState<SupplierEntity[]>(sampleSuppliers);
+  const [result, setResult] = useState<CalculationResult>(() => localMarcosCalculation("Rodada Estratégica de Fornecedores", sampleSuppliers));
+  const [history, setHistory] = useState<DecisionRun[]>([]);
+  const [form, setForm] = useState<SupplierFormState>(buildInitialForm());
   const [loading, setLoading] = useState(false);
+  const [savingSupplier, setSavingSupplier] = useState(false);
+  const [message, setMessage] = useState("Base pronta para cadastrar fornecedores, salvar rodadas e exportar relatórios.");
+  const [lastSavedRunId, setLastSavedRunId] = useState<number | null>(null);
 
-  const chartData = useMemo(() => result.scores.map((score) => ({
-    fornecedor: score.supplier_name,
-    utilidade: score.f_k_i,
-  })), [result]);
+  const apiEnabled = hasApiConfig();
 
-  const radarData = useMemo(() => presetCriteria.map((criterion) => ({
-    criterio: criterion.name,
-    ideal: 9,
-    melhorFornecedor: suppliers.find((supplier) => supplier.id === result.scores[0]?.supplier_id)?.values[criterion.id] ?? 0,
-  })), [result, suppliers]);
+  useEffect(() => {
+    async function bootstrap() {
+      if (!apiEnabled) {
+        setMessage("API não configurada. O frontend está operando em modo local com dados de exemplo.");
+        return;
+      }
 
-  async function recalculate() {
+      try {
+        const [supplierData, historyData] = await Promise.all([fetchSuppliers(), fetchDecisionRuns()]);
+        if (supplierData.length >= 2) {
+          setSuppliers(supplierData);
+          setResult(localMarcosCalculation(runName, supplierData));
+        }
+        setHistory(historyData);
+        if (historyData[0]) {
+          setLastSavedRunId(historyData[0].id);
+        }
+      } catch {
+        setMessage("Não foi possível carregar a API agora. O dashboard continuou em modo local.");
+      }
+    }
+
+    bootstrap();
+  }, [apiEnabled, runName]);
+
+  const chartData = useMemo(
+    () => result.scores.map((score) => ({ fornecedor: score.supplier_name, utilidade: score.f_k_i })),
+    [result]
+  );
+
+  const radarData = useMemo(
+    () =>
+      presetCriteria.map((criterion) => ({
+        criterio: criterion.name,
+        ideal: 9,
+        vencedor: suppliers.find((supplier) => String(supplier.id) === result.insights.winner_supplier_id)?.values[criterion.id] ?? 0,
+      })),
+    [result, suppliers]
+  );
+
+  function resetForm() {
+    setForm(buildInitialForm());
+  }
+
+  function startEditSupplier(supplier: SupplierEntity) {
+    setForm(toFormState(supplier));
+  }
+
+  async function handleSupplierSubmit() {
+    if (!form.name.trim()) {
+      setMessage("Informe o nome do fornecedor.");
+      return;
+    }
+
+    setSavingSupplier(true);
+    try {
+      if (apiEnabled && typeof form.id === "number") {
+        const updated = await updateSupplier(form.id, toDraftPayload(form));
+        setSuppliers((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+        setMessage("Fornecedor atualizado com sucesso.");
+      } else if (apiEnabled) {
+        const created = await createSupplier(toDraftPayload(form));
+        setSuppliers((current) => [...current, created]);
+        setMessage("Fornecedor cadastrado com sucesso.");
+      } else {
+        const localSupplier: SupplierEntity = {
+          id: form.id ?? `local-${Date.now()}`,
+          ...toDraftPayload(form),
+        };
+        setSuppliers((current) => {
+          const exists = typeof form.id !== "undefined";
+          return exists ? current.map((item) => (item.id === form.id ? localSupplier : item)) : [...current, localSupplier];
+        });
+        setMessage("Fornecedor atualizado no modo local.");
+      }
+      resetForm();
+    } catch {
+      setMessage("Falha ao salvar fornecedor.");
+    } finally {
+      setSavingSupplier(false);
+    }
+  }
+
+  async function handleDeleteSupplier(supplier: SupplierEntity) {
+    try {
+      if (apiEnabled && typeof supplier.id === "number") {
+        await deleteSupplier(supplier.id);
+      }
+      setSuppliers((current) => current.filter((item) => item.id !== supplier.id));
+      setMessage(`Fornecedor ${supplier.name} removido.`);
+    } catch {
+      setMessage("Falha ao remover fornecedor.");
+    }
+  }
+
+  async function handleRecalculate() {
+    if (suppliers.length < 2) {
+      setMessage("Cadastre ao menos dois fornecedores para calcular o ranking.");
+      return;
+    }
+
     setLoading(true);
     try {
-      const apiResult = await calculateWithApi(runName, presetCriteria, suppliers);
-      setResult(apiResult ?? localMarcosCalculation(runName, suppliers));
+      const nextResult = apiEnabled ? await calculateWithApi(runName, suppliers) : localMarcosCalculation(runName, suppliers);
+      setResult(nextResult);
+      setMessage("Ranking recalculado com sucesso.");
     } catch {
       setResult(localMarcosCalculation(runName, suppliers));
+      setMessage("A API falhou; o ranking foi recalculado localmente.");
     } finally {
       setLoading(false);
     }
   }
 
-  function updateValue(supplierId: string, criterionId: string, value: number) {
-    setSuppliers((current) => current.map((supplier) => {
-      if (supplier.id !== supplierId) return supplier;
-      return {
-        ...supplier,
-        values: {
-          ...supplier.values,
-          [criterionId]: value,
-        }
-      };
-    }));
+  async function handleSaveRun() {
+    if (suppliers.length < 2) {
+      setMessage("Cadastre ao menos dois fornecedores antes de salvar a rodada.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      if (!apiEnabled) {
+        const localResult = localMarcosCalculation(runName, suppliers);
+        setResult(localResult);
+        setMessage("Sem API configurada, a rodada foi apenas simulada localmente.");
+        return;
+      }
+
+      const run = await saveDecisionRun(runName, suppliers);
+      setResult(run.result);
+      setLastSavedRunId(run.id);
+      const updatedHistory = await fetchDecisionRuns();
+      setHistory(updatedHistory);
+      setMessage("Rodada salva no histórico com sucesso.");
+    } catch {
+      setMessage("Falha ao salvar rodada de decisão.");
+    } finally {
+      setLoading(false);
+    }
   }
+
+  function loadHistoryItem(item: DecisionRun) {
+    setRunName(item.run_name);
+    setResult(item.result);
+    setLastSavedRunId(item.id);
+    setMessage(`Histórico carregado: ${item.run_name}.`);
+  }
+
+  const winner = result.scores[0];
 
   return (
     <div className="space-y-8">
-      <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+      <section className="overflow-hidden rounded-[32px] bg-gradient-to-br from-emerald-950 via-emerald-900 to-lime-700 p-8 text-white shadow-2xl shadow-emerald-950/20">
+        <div className="grid gap-6 lg:grid-cols-[1.4fr_0.6fr] lg:items-end">
           <div>
-            <p className="text-sm font-semibold uppercase tracking-wide text-saladorama-700">Selo Verde Saladorama</p>
-            <h1 className="mt-2 text-3xl font-bold text-slate-900">Seleção de fornecedores sustentáveis com MARCOS</h1>
-            <p className="mt-3 max-w-3xl text-sm text-slate-600">
-              Protótipo em Next.js + Tailwind integrado a um backend FastAPI. O cálculo segue o artigo de Stević et al. (2020),
-              combinando critérios econômicos, sociais e ambientais.
+            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-200">Selo Verde Saladorama · vNext</p>
+            <h1 className="mt-3 max-w-4xl text-4xl font-bold leading-tight">Sistema de apoio à decisão com MARCOS, histórico de rodadas e relatórios exportáveis</h1>
+            <p className="mt-4 max-w-3xl text-sm text-emerald-50/90">
+              Versão-base redesenhada para um fluxo profissional: cadastro de fornecedores, cálculo auditável, explicabilidade dos critérios cruciais e exportação PDF/CSV.
             </p>
           </div>
-          <div className="flex gap-3">
-            <input
-              value={runName}
-              onChange={(e) => setRunName(e.target.value)}
-              className="rounded-xl border border-slate-300 px-4 py-3 text-sm w-64"
-            />
-            <button
-              onClick={recalculate}
-              className="rounded-xl bg-saladorama-700 px-5 py-3 text-sm font-semibold text-white hover:bg-saladorama-900"
-            >
-              {loading ? "Calculando..." : "Recalcular ranking"}
-            </button>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
+            <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+              <div className="text-xs uppercase tracking-wide text-emerald-100">Fornecedores</div>
+              <div className="mt-2 text-3xl font-semibold">{suppliers.length}</div>
+            </div>
+            <div className="rounded-2xl border border-white/15 bg-white/10 p-4 backdrop-blur">
+              <div className="text-xs uppercase tracking-wide text-emerald-100">Melhor alternativa</div>
+              <div className="mt-2 text-lg font-semibold">{winner?.supplier_name ?? "—"}</div>
+              <div className="mt-1 text-sm text-emerald-100">f(Ki) {winner?.f_k_i ?? "—"}</div>
+            </div>
           </div>
         </div>
       </section>
 
-      <section className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-        <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200 overflow-auto">
-          <h2 className="text-xl font-semibold text-slate-900">Entrada de notas (1 a 9)</h2>
-          <p className="mt-1 text-sm text-slate-600">Os critérios já vêm classificados como custo ou benefício.</p>
-          <table className="mt-4 min-w-full border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-slate-200 text-left">
-                <th className="py-3 pr-4">Fornecedor</th>
+      <section className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+        <div className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-900">Cadastro de fornecedores</h2>
+              <p className="mt-1 text-sm text-slate-500">Crie, edite e mantenha a base de fornecedores diretamente pela interface.</p>
+            </div>
+            <button onClick={resetForm} className="rounded-full border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700">
+              Novo fornecedor
+            </button>
+          </div>
+
+          <div className="mt-6 space-y-4">
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="space-y-2 text-sm">
+                <span className="font-medium text-slate-700">Nome</span>
+                <input value={form.name} onChange={(e) => setForm((current) => ({ ...current, name: e.target.value }))} className="w-full rounded-2xl border border-slate-300 px-4 py-3" />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium text-slate-700">Contato</span>
+                <input value={form.contact} onChange={(e) => setForm((current) => ({ ...current, contact: e.target.value }))} className="w-full rounded-2xl border border-slate-300 px-4 py-3" />
+              </label>
+            </div>
+            <label className="space-y-2 text-sm">
+              <span className="font-medium text-slate-700">Observações</span>
+              <textarea value={form.notes} onChange={(e) => setForm((current) => ({ ...current, notes: e.target.value }))} rows={3} className="w-full rounded-2xl border border-slate-300 px-4 py-3" />
+            </label>
+            <div>
+              <div className="mb-3 text-sm font-medium text-slate-700">Notas dos critérios</div>
+              <div className="grid gap-3 md:grid-cols-2">
                 {presetCriteria.map((criterion) => (
-                  <th key={criterion.id} className="py-3 pr-4 min-w-32">
-                    <div>{criterion.name}</div>
-                    <div className="text-xs font-normal text-slate-500">{criterion.type === "cost" ? "Custo" : "Benefício"}</div>
-                  </th>
+                  <label key={criterion.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-medium text-slate-800">{criterion.name}</span>
+                      <span className="rounded-full bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                        {criterion.type === "cost" ? "Custo" : "Benefício"}
+                      </span>
+                    </div>
+                    <input
+                      type="number"
+                      min={1}
+                      max={9}
+                      value={form.values[criterion.id]}
+                      onChange={(e) =>
+                        setForm((current) => ({
+                          ...current,
+                          values: { ...current.values, [criterion.id]: Number(e.target.value) },
+                        }))
+                      }
+                      className="mt-3 w-full rounded-xl border border-slate-300 bg-white px-3 py-2"
+                    />
+                  </label>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
-              {suppliers.map((supplier) => (
-                <tr key={supplier.id} className="border-b border-slate-100 align-top">
-                  <td className="py-3 pr-4 font-medium">{supplier.name}</td>
-                  {presetCriteria.map((criterion) => (
-                    <td key={criterion.id} className="py-3 pr-4">
-                      <input
-                        type="number"
-                        min={1}
-                        max={9}
-                        value={supplier.values[criterion.id]}
-                        onChange={(e) => updateValue(supplier.id, criterion.id, Number(e.target.value))}
-                        className="w-20 rounded-lg border border-slate-300 px-3 py-2"
-                      />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+              </div>
+            </div>
+            <button
+              onClick={handleSupplierSubmit}
+              className="w-full rounded-2xl bg-emerald-700 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-800"
+            >
+              {savingSupplier ? "Salvando fornecedor..." : form.id ? "Atualizar fornecedor" : "Cadastrar fornecedor"}
+            </button>
+          </div>
+        </div>
+
+        <div className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-900">Base cadastrada</h2>
+              <p className="mt-1 text-sm text-slate-500">Fornecedores disponíveis para participar das rodadas de decisão.</p>
+            </div>
+            <div className="rounded-full bg-emerald-50 px-4 py-2 text-xs font-semibold text-emerald-700">{message}</div>
+          </div>
+
+          <div className="mt-6 space-y-3">
+            {suppliers.map((supplier) => (
+              <div key={String(supplier.id)} className="rounded-2xl border border-slate-200 p-4">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <div className="text-lg font-semibold text-slate-900">{supplier.name}</div>
+                    <div className="mt-1 text-sm text-slate-500">{supplier.contact || "Sem contato informado"}</div>
+                    <div className="mt-2 text-sm text-slate-600">{supplier.notes || "Sem observações"}</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => startEditSupplier(supplier)} className="rounded-full border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-700">Editar</button>
+                    <button onClick={() => handleDeleteSupplier(supplier)} className="rounded-full border border-rose-200 bg-rose-50 px-4 py-2 text-xs font-semibold text-rose-700">Excluir</button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+        <div className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+          <h2 className="text-xl font-semibold text-slate-900">Rodada de decisão</h2>
+          <p className="mt-1 text-sm text-slate-500">Configure a rodada, calcule o ranking e registre o histórico auditável.</p>
+          <div className="mt-5 flex flex-col gap-4 sm:flex-row">
+            <input
+              value={runName}
+              onChange={(e) => setRunName(e.target.value)}
+              className="w-full rounded-2xl border border-slate-300 px-4 py-3"
+            />
+            <button onClick={handleRecalculate} className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white">
+              {loading ? "Processando..." : "Recalcular"}
+            </button>
+            <button onClick={handleSaveRun} className="rounded-2xl bg-emerald-700 px-5 py-3 text-sm font-semibold text-white">
+              Salvar rodada
+            </button>
+          </div>
+
+          <div className="mt-6 grid gap-4 md:grid-cols-3">
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <div className="text-xs uppercase tracking-wide text-slate-500">Vencedor</div>
+              <div className="mt-2 text-lg font-semibold text-slate-900">{winner?.supplier_name ?? "—"}</div>
+            </div>
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <div className="text-xs uppercase tracking-wide text-slate-500">Resumo</div>
+              <div className="mt-2 text-sm text-slate-700">{result.insights.summary}</div>
+            </div>
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <div className="text-xs uppercase tracking-wide text-slate-500">Exportação</div>
+              <div className="mt-3 flex gap-2">
+                <a
+                  href={lastSavedRunId ? getExportUrl(lastSavedRunId, "pdf") : "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`rounded-full px-4 py-2 text-xs font-semibold ${lastSavedRunId ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-400 pointer-events-none"}`}
+                >
+                  PDF
+                </a>
+                <a
+                  href={lastSavedRunId ? getExportUrl(lastSavedRunId, "csv") : "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`rounded-full px-4 py-2 text-xs font-semibold ${lastSavedRunId ? "bg-slate-200 text-slate-800" : "bg-slate-100 text-slate-400 pointer-events-none"}`}
+                >
+                  CSV
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-6 space-y-3">
+            {result.scores.map((score) => (
+              <div key={score.supplier_id} className="flex items-center justify-between rounded-2xl border border-slate-200 px-4 py-4">
+                <div>
+                  <div className="font-semibold text-slate-900">#{score.rank} {score.supplier_name}</div>
+                  <div className="mt-1 text-xs text-slate-500">Sᵢ {score.s_i} · Kᵢ- {score.k_i_minus} · Kᵢ+ {score.k_i_plus}</div>
+                </div>
+                <div className="rounded-full bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-700">f(Ki) {score.f_k_i}</div>
+              </div>
+            ))}
+          </div>
         </div>
 
         <div className="space-y-6">
-          <div className="rounded-2xl bg-emerald-50 p-6 shadow-sm ring-1 ring-emerald-100">
-            <p className="text-sm font-semibold uppercase tracking-wide text-emerald-700">Melhor alternativa</p>
-            <h2 className="mt-2 text-2xl font-bold text-emerald-950">{result.scores[0]?.supplier_name}</h2>
-            <p className="mt-2 text-sm text-emerald-800">Utilidade final f(Ki): {result.scores[0]?.f_k_i}</p>
+          <div className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <h3 className="text-lg font-semibold text-slate-900">Critérios cruciais da escolha</h3>
+            <div className="mt-4 grid gap-3">
+              {result.insights.decisive_criteria.map((item) => (
+                <div key={item.criterion_id} className="rounded-2xl bg-emerald-50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="font-semibold text-emerald-950">{item.criterion_name}</div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-emerald-700">impacto {item.impact}</div>
+                  </div>
+                  <p className="mt-2 text-sm text-emerald-900">{item.explanation}</p>
+                </div>
+              ))}
+            </div>
           </div>
 
-          <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-            <h3 className="text-lg font-semibold text-slate-900">Ranking</h3>
+          <div className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <h3 className="text-lg font-semibold text-slate-900">Histórico de decisões</h3>
             <div className="mt-4 space-y-3">
-              {result.scores.map((score) => (
-                <div key={score.supplier_id} className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
+              {history.length === 0 && <div className="rounded-2xl bg-slate-50 p-4 text-sm text-slate-500">Nenhuma rodada salva ainda.</div>}
+              {history.map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => loadHistoryItem(item)}
+                  className="flex w-full items-center justify-between rounded-2xl border border-slate-200 px-4 py-4 text-left hover:bg-slate-50"
+                >
                   <div>
-                    <div className="font-semibold text-slate-900">#{score.rank} {score.supplier_name}</div>
-                    <div className="text-xs text-slate-500">Ki-: {score.k_i_minus} · Ki+: {score.k_i_plus}</div>
+                    <div className="font-semibold text-slate-900">{item.run_name}</div>
+                    <div className="mt-1 text-xs text-slate-500">{new Date(item.created_at).toLocaleString("pt-BR")}</div>
                   </div>
-                  <span className="rounded-full bg-saladorama-100 px-3 py-1 text-xs font-semibold text-saladorama-900">
-                    f(Ki) {score.f_k_i}
-                  </span>
-                </div>
+                  <div className="text-sm text-emerald-700">{item.result.insights.winner_supplier_name}</div>
+                </button>
               ))}
             </div>
           </div>
@@ -222,29 +461,30 @@ export function SeloVerdeDashboard() {
       </section>
 
       <section className="grid gap-6 lg:grid-cols-2">
-        <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-          <h3 className="text-lg font-semibold text-slate-900">Gráfico de barras</h3>
+        <div className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+          <h3 className="text-lg font-semibold text-slate-900">Utilidade final por fornecedor</h3>
           <div className="mt-4 h-80">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="fornecedor" />
                 <YAxis />
                 <Tooltip />
-                <Bar dataKey="utilidade" fill="#15803d" radius={[8, 8, 0, 0]} />
+                <Bar dataKey="utilidade" fill="#15803d" radius={[10, 10, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
         </div>
 
-        <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-          <h3 className="text-lg font-semibold text-slate-900">Radar vs solução ideal</h3>
+        <div className="rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+          <h3 className="text-lg font-semibold text-slate-900">Vencedor vs solução ideal</h3>
           <div className="mt-4 h-80">
             <ResponsiveContainer width="100%" height="100%">
               <RadarChart data={radarData}>
                 <PolarGrid />
                 <PolarAngleAxis dataKey="criterio" tick={{ fontSize: 11 }} />
                 <Radar name="Ideal" dataKey="ideal" stroke="#94a3b8" fill="#cbd5e1" fillOpacity={0.35} />
-                <Radar name="Melhor fornecedor" dataKey="melhorFornecedor" stroke="#15803d" fill="#22c55e" fillOpacity={0.45} />
+                <Radar name="Vencedor" dataKey="vencedor" stroke="#15803d" fill="#22c55e" fillOpacity={0.45} />
                 <Tooltip />
               </RadarChart>
             </ResponsiveContainer>

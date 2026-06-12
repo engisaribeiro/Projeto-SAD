@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from app.schemas.marcos import Criterion, DecisionRequest, DecisionResponse, SupplierScore
+from app.schemas.marcos import (
+    Criterion,
+    CriterionImpact,
+    DecisionInsights,
+    DecisionRequest,
+    DecisionResponse,
+    SupplierScore,
+)
 
 
 SALADORAMA_CRITERIA: List[Criterion] = [
@@ -32,6 +39,52 @@ def _build_reference_points(criteria: List[Criterion], suppliers: List[Dict[str,
             aai[criterion.id] = max(values)
             ai[criterion.id] = min(values)
     return aai, ai
+
+
+def _build_decision_insights(criteria: List[Criterion], ordered_scores: List[SupplierScore]) -> DecisionInsights:
+    winner = ordered_scores[0]
+    runner_up = ordered_scores[1] if len(ordered_scores) > 1 else ordered_scores[0]
+    criteria_by_id = {criterion.id: criterion for criterion in criteria}
+
+    decisive_criteria: List[CriterionImpact] = []
+    for criterion_id, winner_contribution in winner.criterion_contributions.items():
+        criterion = criteria_by_id[criterion_id]
+        runner_up_contribution = runner_up.criterion_contributions.get(criterion_id, 0.0)
+        impact = round(winner_contribution - runner_up_contribution, 6)
+        if criterion.type == "benefit":
+            explanation = (
+                f"{criterion.name} favoreceu {winner.supplier_name} por entregar maior contribuição ponderada"
+                f" do que {runner_up.supplier_name}."
+            )
+        else:
+            explanation = (
+                f"{criterion.name} penalizou menos {winner.supplier_name}, melhorando a distância"
+                f" em relação ao cenário anti-ideal."
+            )
+        decisive_criteria.append(
+            CriterionImpact(
+                criterion_id=criterion.id,
+                criterion_name=criterion.name,
+                criterion_type=criterion.type,
+                weight=criterion.weight,
+                winner_contribution=round(winner_contribution, 6),
+                runner_up_contribution=round(runner_up_contribution, 6),
+                impact=impact,
+                explanation=explanation,
+            )
+        )
+
+    decisive_criteria = sorted(decisive_criteria, key=lambda item: item.impact, reverse=True)[:3]
+    names = ", ".join(item.criterion_name for item in decisive_criteria) or "equilíbrio geral dos critérios"
+    summary = (
+        f"{winner.supplier_name} ficou em 1º lugar. Os critérios mais decisivos para a escolha foram: {names}."
+    )
+    return DecisionInsights(
+        winner_supplier_id=winner.supplier_id,
+        winner_supplier_name=winner.supplier_name,
+        decisive_criteria=decisive_criteria,
+        summary=summary,
+    )
 
 
 def calculate_marcos(payload: DecisionRequest) -> DecisionResponse:
@@ -73,6 +126,9 @@ def calculate_marcos(payload: DecisionRequest) -> DecisionResponse:
         f_k_i = (k_i_plus + k_i_minus) / (
             1 + ((1 - f_k_plus) / f_k_plus) + ((1 - f_k_minus) / f_k_minus)
         )
+        criterion_contributions = {
+            criterion.id: round(weighted_matrix[idx][criterion.id], 6) for criterion in criteria
+        }
         scores.append(
             SupplierScore(
                 supplier_id=supplier.id,
@@ -82,6 +138,7 @@ def calculate_marcos(payload: DecisionRequest) -> DecisionResponse:
                 k_i_plus=round(k_i_plus, 6),
                 f_k_i=round(f_k_i, 6),
                 rank=0,
+                criterion_contributions=criterion_contributions,
             )
         )
 
@@ -89,6 +146,7 @@ def calculate_marcos(payload: DecisionRequest) -> DecisionResponse:
     for rank, score in enumerate(ordered_scores, start=1):
         score.rank = rank
 
+    insights = _build_decision_insights(criteria, ordered_scores)
     return DecisionResponse(
         run_name=payload.run_name,
         aai={k: round(v, 6) for k, v in aai.items()},
@@ -96,4 +154,5 @@ def calculate_marcos(payload: DecisionRequest) -> DecisionResponse:
         normalized_matrix=[{k: round(v, 6) for k, v in row.items()} for row in normalized_matrix],
         weighted_matrix=[{k: round(v, 6) for k, v in row.items()} for row in weighted_matrix],
         scores=ordered_scores,
+        insights=insights,
     )

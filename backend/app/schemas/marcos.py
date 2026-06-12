@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, List, Literal, Optional
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 CriterionType = Literal["cost", "benefit"]
@@ -63,6 +64,17 @@ class DecisionRequest(BaseModel):
         return self
 
 
+class CriterionImpact(BaseModel):
+    criterion_id: str
+    criterion_name: str
+    criterion_type: CriterionType
+    weight: float
+    winner_contribution: float
+    runner_up_contribution: float
+    impact: float
+    explanation: str
+
+
 class SupplierScore(BaseModel):
     supplier_id: str
     supplier_name: str
@@ -71,6 +83,14 @@ class SupplierScore(BaseModel):
     k_i_plus: float
     f_k_i: float
     rank: int
+    criterion_contributions: Dict[str, float] = Field(default_factory=dict)
+
+
+class DecisionInsights(BaseModel):
+    winner_supplier_id: str
+    winner_supplier_name: str
+    decisive_criteria: List[CriterionImpact] = Field(default_factory=list)
+    summary: str
 
 
 class DecisionResponse(BaseModel):
@@ -80,3 +100,4 @@ class DecisionResponse(BaseModel):
     normalized_matrix: List[Dict[str, float]]
     weighted_matrix: List[Dict[str, float]]
     scores: List[SupplierScore]
+    insights: DecisionInsights
