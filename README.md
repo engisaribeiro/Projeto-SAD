@@ -11,7 +11,7 @@ O Saladorama precisa comparar fornecedores com base em múltiplos critérios sim
 O motor do sistema segue o artigo:
 
 - Stević et al. (2020) — *Sustainable supplier selection in healthcare industries using a new MCDM method: Measurement of alternatives and ranking according to COmpromise solution (MARCOS)*
-- Arquivo-base: https://www.genspark.ai/api/files/s/KFrnn1YA
+- Arquivo-base: https://www.sciencedirect.com/science/article/pii/S0360835219307004
 
 ## Stack técnica
 
