@@ -127,7 +127,6 @@ A interface já está estruturada para exibir ranking, gráfico de barras e rada
 cd backend
 pytest -q
 ```
-
 ## Próximos passos recomendados
 
 - persistir fornecedores/rodadas em banco
