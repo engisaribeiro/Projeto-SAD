@@ -70,7 +70,7 @@ export const presetCriteria: Criterion[] = [
   { id: "prazo_pagamento", name: "Prazo de Pagamento", category: "economic", type: "benefit", weight: 0.07 },
   { id: "origem_comunidade", name: "Origem em Comunidade/Favela", category: "social", type: "benefit", weight: 0.11 },
   { id: "distancia_cozinha", name: "Distância da Cozinha", category: "social", type: "cost", weight: 0.1 },
-  { id: "menor_faturamento", name: "Favorecimento a Pequenos Produtores", category: "social", type: "cost", weight: 0.11 },
+  { id: "menor_faturamento", name: "Favorecimento a Pequenos Produtores", category: "social", type: "benefit", weight: 0.11 },
   { id: "sem_agrotoxicos", name: "Ausência de Agrotóxicos", category: "environmental", type: "benefit", weight: 0.1 },
   { id: "embalagem_bio", name: "Embalagens Biodegradáveis", category: "environmental", type: "benefit", weight: 0.08 },
   { id: "baixa_pegada", name: "Baixa Pegada de Carbono", category: "environmental", type: "benefit", weight: 0.07 },

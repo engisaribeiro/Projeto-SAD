@@ -20,7 +20,7 @@ SALADORAMA_CRITERIA: List[Criterion] = [
     Criterion(id="prazo_pagamento", name="Prazo de Pagamento", category="economic", type="benefit", weight=0.07),
     Criterion(id="origem_comunidade", name="Origem em Comunidade/Favela", category="social", type="benefit", weight=0.11),
     Criterion(id="distancia_cozinha", name="Distância da Cozinha", category="social", type="cost", weight=0.10),
-    Criterion(id="menor_faturamento", name="Favorecimento a Pequenos Produtores/Menor Faturamento", category="social", type="cost", weight=0.11),
+    Criterion(id="menor_faturamento", name="Favorecimento a Pequenos Produtores/Menor Faturamento", category="social", type="benefit", weight=0.11),
     Criterion(id="sem_agrotoxicos", name="Ausência de Agrotóxicos", category="environmental", type="benefit", weight=0.10),
     Criterion(id="embalagem_bio", name="Embalagens Biodegradáveis", category="environmental", type="benefit", weight=0.08),
     Criterion(id="baixa_pegada", name="Entrega via Bicicleta/Baixa Pegada de Carbono", category="environmental", type="benefit", weight=0.07),

@@ -246,10 +246,10 @@ export function SeloVerdeDashboard() {
       <section className="overflow-hidden rounded-[32px] bg-gradient-to-br from-emerald-950 via-emerald-900 to-lime-700 p-8 text-white shadow-2xl shadow-emerald-950/20">
         <div className="grid gap-6 lg:grid-cols-[1.4fr_0.6fr] lg:items-end">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-200">Selo Verde Saladorama · vNext</p>
-            <h1 className="mt-3 max-w-4xl text-4xl font-bold leading-tight">Sistema de apoio à decisão com MARCOS, histórico de rodadas e relatórios exportáveis</h1>
+            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-200">Selo Verde Saladorama</p>
+            <h1 className="mt-3 max-w-4xl text-4xl font-bold leading-tight">Sistema de apoio à decisão com MARCOS</h1>
             <p className="mt-4 max-w-3xl text-sm text-emerald-50/90">
-              Versão-base redesenhada para um fluxo profissional: cadastro de fornecedores, cálculo auditável, explicabilidade dos critérios cruciais e exportação PDF/CSV.
+              Projeto da Disciplina de Sistemas de Apoio à Decisão CIn/UFPE.
             </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
